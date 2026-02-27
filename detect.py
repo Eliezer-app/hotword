@@ -4,18 +4,23 @@ Wake word detection daemon.
 Uses Google's pretrained speech embedding + trained classifier.
 Continuously streams from the microphone and prints to stdout on detection.
 
-Usage: python detect.py [--config output/config.yaml] [--debug]
+Usage:
+  python detect.py [--debug]                       # mic (default)
+  python detect.py --audio-source /tmp/audio.sock   # unix socket (16kHz mono float32 PCM)
 """
 
 import argparse
 import signal
+import socket
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
-import sounddevice as sd
 import yaml
+
+_DIR = Path(__file__).resolve().parent
 
 
 def load_config(path):
@@ -24,9 +29,10 @@ def load_config(path):
 
 
 class Detector:
-    def __init__(self, melspec_path="models/melspectrogram.onnx",
-                 embed_path="models/embedding_model.onnx",
-                 classifier_path="output/classifier.onnx"):
+    def __init__(self, melspec_path=None, embed_path=None, classifier_path=None):
+        melspec_path = melspec_path or _DIR / "models" / "melspectrogram.onnx"
+        embed_path = embed_path or _DIR / "models" / "embedding_model.onnx"
+        classifier_path = classifier_path or _DIR / "output" / "classifier.onnx"
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 1
         opts.intra_op_num_threads = 1
@@ -66,10 +72,40 @@ class Detector:
         return prob
 
 
+def audio_from_mic(sr, step_samples):
+    """Yield audio chunks from the microphone."""
+    import sounddevice as sd
+    with sd.InputStream(samplerate=sr, channels=1, dtype="float32") as stream:
+        while True:
+            chunk, _ = stream.read(step_samples)
+            yield chunk[:, 0]
+
+
+def audio_from_socket(sock_path, step_samples):
+    """Yield audio chunks from a unix socket (float32 PCM)."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(sock_path)
+    step_bytes = step_samples * 4  # float32 = 4 bytes
+    buf = b""
+    try:
+        while True:
+            while len(buf) < step_bytes:
+                data = sock.recv(step_bytes - len(buf))
+                if not data:
+                    return
+                buf += data
+            yield np.frombuffer(buf[:step_bytes], dtype=np.float32)
+            buf = buf[step_bytes:]
+    finally:
+        sock.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Wake word detector")
-    parser.add_argument("--config", default="output/config.yaml")
+    parser.add_argument("--config", default=str(_DIR / "output" / "config.yaml"))
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--audio-source", default="mic",
+                        help="'mic' (default) or path to unix socket")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -88,36 +124,40 @@ def main():
 
     signal.signal(signal.SIGINT, lambda *_: (print("\nStopped."), sys.exit(0)))
 
+    source = args.audio_source
+    if source == "mic":
+        print(f"Audio: microphone")
+        chunks = audio_from_mic(sr, step_samples)
+    else:
+        print(f"Audio: {source}")
+        chunks = audio_from_socket(source, step_samples)
+
     print(f"Listening for wake word (threshold={dc['threshold']}, "
           f"smoothing={dc['smoothing_window']}, step={dc['step_ms']}ms)")
     print("Press Ctrl+C to stop.\n")
 
     try:
-        with sd.InputStream(samplerate=sr, channels=1, dtype="float32") as stream:
-            while True:
-                chunk, _ = stream.read(step_samples)
-                chunk = chunk[:, 0]
+        for chunk in chunks:
+            audio_buffer = np.roll(audio_buffer, -len(chunk))
+            audio_buffer[-len(chunk):] = chunk
 
-                audio_buffer = np.roll(audio_buffer, -len(chunk))
-                audio_buffer[-len(chunk):] = chunk
+            prob = detector.predict(audio_buffer)
 
-                prob = detector.predict(audio_buffer)
+            if args.debug:
+                bar = "#" * int(prob * 40)
+                print(f"\r  conf: {prob:.3f} [{bar:<40s}]", end="", flush=True)
 
-                if args.debug:
-                    bar = "#" * int(prob * 40)
-                    print(f"\r  conf: {prob:.3f} [{bar:<40s}]", end="", flush=True)
+            if prob > dc["threshold"]:
+                consecutive += 1
+            else:
+                consecutive = 0
 
-                if prob > dc["threshold"]:
-                    consecutive += 1
-                else:
-                    consecutive = 0
-
-                now = time.time()
-                if (consecutive >= dc["smoothing_window"]
-                        and now - last_trigger > dc["cooldown_sec"]):
-                    print(f"DETECTED (confidence: {prob:.3f})")
-                    consecutive = 0
-                    last_trigger = now
+            now = time.time()
+            if (consecutive >= dc["smoothing_window"]
+                    and now - last_trigger > dc["cooldown_sec"]):
+                print(f"DETECTED (confidence: {prob:.3f})")
+                consecutive = 0
+                last_trigger = now
     except KeyboardInterrupt:
         print("\nStopped.")
 

@@ -7,7 +7,7 @@ train:
 	python train.py
 
 detect:
-	python detect.py
+	python detect.py --debug
 
 eval:
 	python eval.py

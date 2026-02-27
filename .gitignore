@@ -2,6 +2,7 @@ __pycache__
 .claude
 openwakeword
 train_data
+my-voice.mp4
 test_data
 venv
 data

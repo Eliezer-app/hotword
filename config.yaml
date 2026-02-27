@@ -13,7 +13,7 @@ model:
 training:
   positive_glob: "train_data/wake*_16k.wav"
   negative_glob: "train_data/neg*_16k.wav"
-  augmentations_per_sample: 500
+  augmentations_per_sample: 200
   negative_data_url: "https://www.openslr.org/resources/12/dev-clean.tar.gz"
   negative_max_samples: 10000
   n_test_samples: 4

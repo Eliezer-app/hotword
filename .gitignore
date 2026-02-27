@@ -1,0 +1,10 @@
+__pycache__
+.claude
+openwakeword
+train_data
+test_data
+venv
+data
+old
+output
+models/*.onnx

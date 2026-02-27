@@ -1,0 +1,25 @@
+audio:
+  sample_rate: 16000
+  window_sec: 2.0
+detection:
+  cooldown_sec: 2.0
+  smoothing_window: 3
+  step_ms: 80
+  threshold: 0.85
+model:
+  hidden: 64
+  dropout: 0.3
+training:
+  augmentations_per_sample: 100
+  batch_size: 64
+  data_dir: data
+  epochs: 30
+  learning_rate: 0.001
+  n_test_samples: 4
+  negative_data_url: https://www.openslr.org/resources/12/dev-clean.tar.gz
+  negative_glob: train_data/neg*_16k.wav
+  negative_max_samples: 2000
+  output_dir: output
+  patience: 10
+  positive_glob: train_data/wake*_16k.wav
+  weight_decay: 0.0001

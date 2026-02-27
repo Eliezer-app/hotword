@@ -120,7 +120,7 @@ def main():
 
     audio_buffer = np.zeros(window_samples, dtype=np.float32)
     consecutive = 0
-    last_trigger = 0.0
+    armed = True
 
     signal.signal(signal.SIGINT, lambda *_: (print("\nStopped."), sys.exit(0)))
 
@@ -151,13 +151,12 @@ def main():
                 consecutive += 1
             else:
                 consecutive = 0
+                armed = True
 
-            now = time.time()
-            if (consecutive >= dc["smoothing_window"]
-                    and now - last_trigger > dc["cooldown_sec"]):
+            if consecutive >= dc["smoothing_window"] and armed:
                 print(f"DETECTED (confidence: {prob:.3f})")
                 consecutive = 0
-                last_trigger = now
+                armed = False
     except KeyboardInterrupt:
         print("\nStopped.")
 

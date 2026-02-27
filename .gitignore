@@ -4,7 +4,7 @@ openwakeword
 train_data
 test_data
 raw
-venv
+.venv
 data
 old
 output

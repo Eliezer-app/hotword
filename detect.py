@@ -102,7 +102,7 @@ def audio_from_socket(sock_path, step_samples):
 
 def main():
     parser = argparse.ArgumentParser(description="Wake word detector")
-    parser.add_argument("--config", default=str(_DIR / "output" / "config.yaml"))
+    parser.add_argument("--config", default=str(_DIR / "config.yaml"))
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--audio-source", default="mic",
                         help="'mic' (default) or path to unix socket")

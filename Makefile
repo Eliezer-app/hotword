@@ -1,28 +1,32 @@
-.PHONY: setup train detect eval record record-negative record-test-positive record-test-negative clean
+PYTHON ?= python3.13
 
-setup:
-	pip install -r requirements.txt
+.PHONY: prepare train detect eval record record-negative record-test-positive record-test-negative clean
+
+prepare:
+	$(PYTHON) -m venv .venv
+	.venv/bin/pip install --upgrade pip
+	.venv/bin/pip install -r requirements.txt
 
 train:
-	python train.py
+	.venv/bin/python train.py
 
 detect:
-	python detect.py --debug
+	.venv/bin/python detect.py --debug
 
 eval:
-	python eval.py
+	.venv/bin/python eval.py
 
 record:
-	python record.py --output-dir train_data
+	.venv/bin/python record.py --output-dir train_data
 
 record-negative:
-	python record.py --output-dir train_data --prefix neg
+	.venv/bin/python record.py --output-dir train_data --prefix neg
 
 record-test-positive:
-	python record.py --output-dir test_data --prefix pos
+	.venv/bin/python record.py --output-dir test_data --prefix pos
 
 record-test-negative:
-	python record.py --output-dir test_data --prefix neg
+	.venv/bin/python record.py --output-dir test_data --prefix neg
 
 clean:
 	rm -rf data/ output/

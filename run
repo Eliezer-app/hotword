@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Run hotword detector: reads float32 PCM from a unix socket, prints detections to stdout.
+# Usage: hotword/run --audio-source /tmp/speech-audio.sock
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$DIR/.venv/bin/python" -u "$DIR/detect.py" "$@"

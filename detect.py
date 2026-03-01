@@ -113,6 +113,7 @@ def main():
     dc = cfg["detection"]
 
     detector = Detector()
+    print("Hotword: ready", file=sys.stderr, flush=True)
 
     sr = ac["sample_rate"]
     window_samples = int(ac["window_sec"] * sr)

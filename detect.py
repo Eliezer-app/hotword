@@ -122,6 +122,7 @@ def main():
     audio_buffer = np.zeros(window_samples, dtype=np.float32)
     consecutive = 0
     armed = True
+    cooldown_until = 0
 
     signal.signal(signal.SIGINT, lambda *_: (print("\nStopped."), sys.exit(0)))
 
@@ -148,6 +149,10 @@ def main():
                 bar = "#" * int(prob * 40)
                 print(f"\r  conf: {prob:.3f} [{bar:<40s}]", end="", flush=True)
 
+            now = time.time()
+            if now < cooldown_until:
+                continue
+
             if prob > dc["threshold"]:
                 consecutive += 1
             else:
@@ -155,9 +160,10 @@ def main():
                 armed = True
 
             if consecutive >= dc["smoothing_window"] and armed:
-                print(f"DETECTED (confidence: {prob:.3f})")
+                print(f"DETECTED (confidence: {prob:.3f})", flush=True)
                 consecutive = 0
                 armed = False
+                cooldown_until = now + dc.get("cooldown_sec", 2.0)
     except KeyboardInterrupt:
         print("\nStopped.")
 

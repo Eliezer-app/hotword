@@ -14,6 +14,8 @@ import signal
 import socket
 import sys
 import time
+import wave
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -100,10 +102,70 @@ def audio_from_socket(sock_path, step_samples):
         sock.close()
 
 
+class Recorder:
+    """Records audio for hotword hits and near-misses.
+
+    Saves the 2s audio window at two moments:
+    - hit: when detection fires
+    - near: when score peaked above near_threshold but detection didn't fire
+
+    Uses a simple state machine: idle → tracking → (save or discard) → idle
+    After saving (hit or near), suppresses for suppress_sec to avoid duplicates.
+    """
+
+    def __init__(self, rec_dir, near_threshold, sr, suppress_sec=4.0):
+        self.rec_dir = Path(rec_dir)
+        self.rec_dir.mkdir(exist_ok=True)
+        self.near_threshold = near_threshold
+        self.sr = sr
+        self.suppress_sec = suppress_sec
+        self.suppress_until = 0
+        self.peak = 0.0
+        self.peak_audio = None
+
+    def update(self, prob, audio_buffer):
+        """Call every step with current score and audio."""
+        now = time.time()
+        if now < self.suppress_until:
+            return
+
+        if prob > self.near_threshold:
+            if prob > self.peak:
+                self.peak = prob
+                self.peak_audio = audio_buffer.copy()
+        elif self.peak > 0:
+            # Score dropped — save peak as near-miss
+            self._save("near", self.peak, self.peak_audio)
+            self._suppress()
+
+    def mark_hit(self, prob, audio_buffer):
+        """Call when detection fires."""
+        self._save("hit", prob, audio_buffer)
+        self._suppress()
+
+    def _suppress(self):
+        self.suppress_until = time.time() + self.suppress_sec
+        self.peak = 0.0
+        self.peak_audio = None
+
+    def _save(self, label, prob, audio):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = self.rec_dir / f"{label}_{prob:.3f}_{ts}.wav"
+        audio_int16 = (audio * 32767).clip(-32768, 32767).astype(np.int16)
+        with wave.open(str(path), 'w') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(self.sr)
+            wf.writeframes(audio_int16.tobytes())
+        self.hit = False
+
+
 def main():
     parser = argparse.ArgumentParser(description="Wake word detector")
     parser.add_argument("--config", default=str(_DIR / "config.yaml"))
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--record", action="store_true",
+                        help="Save WAV files for hits and near-misses")
     parser.add_argument("--audio-source", default="mic",
                         help="'mic' (default) or path to unix socket")
     args = parser.parse_args()
@@ -124,7 +186,19 @@ def main():
     armed = True
     cooldown_until = 0
 
-    signal.signal(signal.SIGINT, lambda *_: (print("\nStopped."), sys.exit(0)))
+    recorder = None
+    if args.record:
+        near_threshold = dc["threshold"] * 0.6
+        recorder = Recorder(_DIR / "recordings", near_threshold, sr)
+        print(f"Recording to {recorder.rec_dir} (hits + near>{near_threshold:.2f})",
+              file=sys.stderr, flush=True)
+
+    running = True
+    def handle_signal(*_):
+        nonlocal running
+        running = False
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
 
     source = args.audio_source
     if source == "mic":
@@ -138,34 +212,40 @@ def main():
           f"smoothing={dc['smoothing_window']}, step={dc['step_ms']}ms)")
     print("Press Ctrl+C to stop.\n")
 
-    try:
-        for chunk in chunks:
-            audio_buffer = np.roll(audio_buffer, -len(chunk))
-            audio_buffer[-len(chunk):] = chunk
+    for chunk in chunks:
+        if not running:
+            break
+        audio_buffer = np.roll(audio_buffer, -len(chunk))
+        audio_buffer[-len(chunk):] = chunk
 
-            prob = detector.predict(audio_buffer)
+        prob = detector.predict(audio_buffer)
 
-            if args.debug:
-                bar = "#" * int(prob * 40)
-                print(f"\r  conf: {prob:.3f} [{bar:<40s}]", end="", flush=True)
+        if args.debug:
+            bar = "#" * int(prob * 40)
+            print(f"\r  conf: {prob:.3f} [{bar:<40s}]", end="", flush=True)
 
-            now = time.time()
-            if now < cooldown_until:
-                continue
+        now = time.time()
+        if now < cooldown_until:
+            continue
 
-            if prob > dc["threshold"]:
-                consecutive += 1
-            else:
-                consecutive = 0
-                armed = True
+        if recorder:
+            recorder.update(prob, audio_buffer)
 
-            if consecutive >= dc["smoothing_window"] and armed:
-                print(f"DETECTED (confidence: {prob:.3f})", flush=True)
-                consecutive = 0
-                armed = False
-                cooldown_until = now + dc.get("cooldown_sec", 2.0)
-    except KeyboardInterrupt:
-        print("\nStopped.")
+        if prob > dc["threshold"]:
+            consecutive += 1
+        else:
+            consecutive = 0
+            armed = True
+
+        if consecutive >= dc["smoothing_window"] and armed:
+            print(f"DETECTED (confidence: {prob:.3f})", flush=True)
+            if recorder:
+                recorder.mark_hit(prob, audio_buffer)
+            consecutive = 0
+            armed = False
+            cooldown_until = now + dc.get("cooldown_sec", 2.0)
+
+    print("\nStopped.")
 
 
 if __name__ == "__main__":

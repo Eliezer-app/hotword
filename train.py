@@ -239,14 +239,14 @@ def train(cfg):
     print("\n=== Embedding audio ===")
 
     # Positives with audio augmentation
-    pos_files = sorted(glob.glob(tc["positive_glob"]))
+    pos_files = sorted(glob.glob(str(Path(tc["positive_dir"]) / "*.wav")))
     pos_all = embed_files(extractor, pos_files, data_dir / "pos_embeddings.npz",
                           "Positives", sr, ac["window_sec"], n_frames, n_aug=n_aug)
     emb_per_file = 1 + n_aug
     pos_by_file = pos_all.reshape(len(pos_files), emb_per_file, n_frames, 96)
 
     # Hand-recorded negatives (augmented same as positives)
-    neg_files = sorted(glob.glob(tc["negative_glob"]))
+    neg_files = sorted(glob.glob(str(Path(tc["negative_dir"]) / "*.wav")))
     user_emb = None
     if neg_files:
         user_emb = embed_files(extractor, neg_files, data_dir / "user_neg_embeddings.npz",
@@ -396,6 +396,18 @@ def train(cfg):
         p = output_dir / f"model_seed{seed}.pt"
         if p.exists():
             p.unlink()
+
+    # Backup previous classifier
+    prev = output_dir / "classifier.onnx"
+    if prev.exists():
+        from datetime import datetime
+        mtime = datetime.fromtimestamp(prev.stat().st_mtime)
+        tag = mtime.strftime("%Y%m%d_%H%M%S")
+        prev.rename(output_dir / f"classifier_{tag}.onnx")
+        prev_data = output_dir / "classifier.onnx.data"
+        if prev_data.exists():
+            prev_data.rename(output_dir / f"classifier_{tag}.onnx.data")
+        print(f"  Backed up previous classifier as classifier_{tag}.onnx")
 
     model = model.to("cpu")
     export_classifier_onnx(model, str(output_dir / "classifier.onnx"), n_frames, 96)

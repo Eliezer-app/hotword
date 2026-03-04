@@ -7,10 +7,10 @@ model:
   dropout: 0.3
 
 training:
-  positive_glob: "train_data/wake*_16k.wav"
-  negative_glob: "train_data/neg*_16k.wav"
+  positive_dir: "train_data/positive"
+  negative_dir: "train_data/negative"
   voice_recording: "raw/my-voice.mp4"  # optional: long audio file of user's voice (no wake word)
-  augmentations_per_sample: 200
+  augmentations_per_sample: 50
   negative_data_url: "https://www.openslr.org/resources/12/dev-clean.tar.gz"
   negative_max_samples: 10000
   n_test_samples: 4

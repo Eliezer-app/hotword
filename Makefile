@@ -1,6 +1,6 @@
 PYTHON ?= python3.13
 
-.PHONY: prepare train detect eval record record-negative record-test-positive record-test-negative clean
+.PHONY: prepare train detect eval record record-negative record-test-positive record-test-negative sort-records clean
 
 prepare:
 	$(PYTHON) -m venv .venv
@@ -27,6 +27,9 @@ record-test-positive:
 
 record-test-negative:
 	.venv/bin/python record.py --output-dir test_data --prefix neg
+
+sort-records:
+	.venv/bin/python sort_recordings.py
 
 clean:
 	rm -rf data/ output/

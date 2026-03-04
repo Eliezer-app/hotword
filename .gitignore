@@ -8,3 +8,5 @@ raw
 data
 old
 output
+
+copy-model-to-macmini.sh

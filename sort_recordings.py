@@ -60,8 +60,9 @@ def main():
     print(f"\n{len(files)} recordings. [p]ositive [n]egative [r]eplay [s]kip [d]elete [q]uit\n")
 
     for f in files:
-        print(f"  {f.name}", end="", flush=True)
+        print(f"  {f.name} ", end="", flush=True)
         play(f)
+        print("→ ", end="", flush=True)
 
         while True:
             ch = getch()
@@ -70,18 +71,18 @@ def main():
                 continue
             if ch == "p":
                 shutil.move(str(f), str(POS_DIR / f.name))
-                print(f" → positive")
+                print("positive")
                 break
             elif ch == "n":
                 shutil.move(str(f), str(NEG_DIR / f.name))
-                print(f" → negative")
+                print("negative")
                 break
             elif ch == "s":
-                print(" — skipped")
+                print("skipped")
                 break
             elif ch == "d":
                 f.unlink()
-                print(" — deleted")
+                print("deleted")
                 break
             elif ch == "q":
                 print("\nQuit.")

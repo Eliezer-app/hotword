@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import os
 import signal
 import socket
 import sys
@@ -87,12 +88,18 @@ def audio_from_socket(sock_path, step_samples):
     """Yield audio chunks from a unix socket (float32 PCM)."""
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(sock_path)
+    sock.settimeout(0.5)
     step_bytes = step_samples * 4  # float32 = 4 bytes
     buf = b""
     try:
-        while True:
+        while running:
             while len(buf) < step_bytes:
-                data = sock.recv(step_bytes - len(buf))
+                try:
+                    data = sock.recv(step_bytes - len(buf))
+                except socket.timeout:
+                    if not running:
+                        return
+                    continue
                 if not data:
                     return
                 buf += data
@@ -160,6 +167,22 @@ class Recorder:
         self.hit = False
 
 
+running = True
+_sigcount = 0
+
+
+def _handle_signal(*_):
+    global running, _sigcount
+    _sigcount += 1
+    running = False
+    if _sigcount >= 2:
+        os._exit(1)
+
+
+signal.signal(signal.SIGINT, _handle_signal)
+signal.signal(signal.SIGTERM, _handle_signal)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Wake word detector")
     parser.add_argument("--config", default=str(_DIR / "config.yaml"))
@@ -192,13 +215,6 @@ def main():
         recorder = Recorder(_DIR / "recordings", near_threshold, sr)
         print(f"Recording to {recorder.rec_dir} (hits + near>{near_threshold:.2f})",
               file=sys.stderr, flush=True)
-
-    running = True
-    def handle_signal(*_):
-        nonlocal running
-        running = False
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
 
     source = args.audio_source
     if source == "mic":

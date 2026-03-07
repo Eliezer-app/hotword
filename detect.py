@@ -21,7 +21,10 @@ from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
+import torch
 import yaml
+
+from embedding import EmbeddingExtractor
 
 _DIR = Path(__file__).resolve().parent
 
@@ -33,44 +36,20 @@ def load_config(path):
 
 class Detector:
     def __init__(self, melspec_path=None, embed_path=None, classifier_path=None):
-        melspec_path = melspec_path or _DIR / "models" / "melspectrogram.onnx"
-        embed_path = embed_path or _DIR / "models" / "embedding_model.onnx"
-        classifier_path = classifier_path or _DIR / "output" / "classifier.onnx"
+        melspec_path = melspec_path or str(_DIR / "models" / "melspectrogram.onnx")
+        embed_path = embed_path or str(_DIR / "models" / "embedding_model.onnx")
+        classifier_path = classifier_path or str(_DIR / "output" / "classifier.onnx")
+        self.extractor = EmbeddingExtractor(melspec_path, embed_path)
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 1
         opts.intra_op_num_threads = 1
-        self.melspec = ort.InferenceSession(melspec_path, opts)
-        self.embed = ort.InferenceSession(embed_path, opts)
         self.classifier = ort.InferenceSession(classifier_path, opts)
 
     def predict(self, audio_float, n_frames=16):
         """Run full pipeline on float32 audio buffer, return probability."""
-        audio_int16 = (audio_float * 32767).clip(-32768, 32767).astype(np.int16)
-
-        # Melspectrogram
-        x = audio_int16.astype(np.float32)[None, :]
-        mel = self.melspec.run(None, {'input': x})[0]
-        mel = np.squeeze(mel) / 10 + 2
-
-        # Embeddings: slide 76-frame windows, step 8
-        windows = []
-        for i in range(0, mel.shape[0], 8):
-            w = mel[i:i+76]
-            if w.shape[0] == 76:
-                windows.append(w)
-        if not windows:
+        emb = self.extractor.extract_fixed(audio_float, n_frames=n_frames)
+        if np.all(emb == 0):
             return 0.0
-
-        batch = np.array(windows, dtype=np.float32)[:, :, :, None]
-        emb = self.embed.run(None, {'input_1': batch})[0].squeeze(axis=(1, 2))
-
-        # Pad/trim to n_frames
-        if emb.shape[0] >= n_frames:
-            emb = emb[:n_frames]
-        else:
-            emb = np.vstack([emb, np.zeros((n_frames - emb.shape[0], 96), dtype=np.float32)])
-
-        # Classify
         prob = self.classifier.run(None, {'embeddings': emb[None, :]})[0].item()
         return prob
 
@@ -198,6 +177,13 @@ def main():
     dc = cfg["detection"]
 
     detector = Detector()
+
+    # Silero VAD — gate classifier on speech presence
+    vad, _ = torch.hub.load("snakers4/silero-vad", "silero_vad",
+                            verbose=False, onnx=False, trust_repo=True)
+    vad_threshold = dc.get("vad_threshold", 0.5)
+    SILERO_CHUNK = 512
+
     print("Hotword: ready", file=sys.stderr, flush=True)
 
     sr = ac["sample_rate"]
@@ -228,13 +214,27 @@ def main():
           f"smoothing={dc['smoothing_window']}, step={dc['step_ms']}ms)")
     print("Press Ctrl+C to stop.\n")
 
+    silero_buf = np.zeros(0, dtype=np.float32)
+
     for chunk in chunks:
         if not running:
             break
         audio_buffer = np.roll(audio_buffer, -len(chunk))
         audio_buffer[-len(chunk):] = chunk
 
-        prob = detector.predict(audio_buffer)
+        # VAD gate — only classify when speech detected
+        silero_buf = np.append(silero_buf, chunk)
+        is_speech = False
+        while len(silero_buf) >= SILERO_CHUNK:
+            vad_prob = vad(torch.from_numpy(silero_buf[:SILERO_CHUNK]), sr).item()
+            silero_buf = silero_buf[SILERO_CHUNK:]
+            if vad_prob > vad_threshold:
+                is_speech = True
+
+        if not is_speech:
+            prob = 0.0
+        else:
+            prob = detector.predict(audio_buffer)
 
         if args.debug:
             bar = "#" * int(prob * 40)

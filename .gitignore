@@ -8,5 +8,8 @@ raw
 data
 old
 output
+recordings/
 
 copy-model-to-macmini.sh
+copy-recordings-from-macmini.sh
+

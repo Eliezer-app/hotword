@@ -2,8 +2,8 @@
 Wake word training pipeline.
 
 Uses Google's pretrained speech embedding as frozen feature extractor,
-trains a small MLP classifier on top. All embeddings are cached — subsequent
-runs with the same audio files complete in seconds.
+trains a small attention classifier on top. All embeddings are cached —
+subsequent runs with the same audio files complete in seconds.
 
 Negative sources (in order of importance):
   1. Hand-recorded negatives (train_data/neg*_16k.wav) — user's voice, augmented
@@ -31,46 +31,13 @@ from torch.utils.data import DataLoader, TensorDataset
 import yaml
 
 from augment import augment_one, pad_or_trim
+from embedding import EmbeddingExtractor
 from model import WakeWordClassifier, export_classifier_onnx
 
 
 def load_config(path="config.yaml"):
     with open(path) as f:
         return yaml.safe_load(f)
-
-
-# --- Embedding extraction ---
-
-class EmbeddingExtractor:
-    def __init__(self, melspec_path="models/melspectrogram.onnx",
-                 embedding_path="models/embedding_model.onnx"):
-        opts = ort.SessionOptions()
-        opts.inter_op_num_threads = 1
-        opts.intra_op_num_threads = 1
-        self.melspec_sess = ort.InferenceSession(melspec_path, opts)
-        self.embed_sess = ort.InferenceSession(embedding_path, opts)
-
-    def extract_fixed(self, audio_float, sr=16000, n_frames=16):
-        audio_int16 = (audio_float * 32767).clip(-32768, 32767).astype(np.int16)
-        x = audio_int16.astype(np.float32)[None, :]
-        mel = self.melspec_sess.run(None, {'input': x})[0]
-        mel = np.squeeze(mel) / 10 + 2
-
-        windows = []
-        for i in range(0, mel.shape[0], 8):
-            w = mel[i:i+76]
-            if w.shape[0] == 76:
-                windows.append(w)
-
-        if not windows:
-            return np.zeros((n_frames, 96), dtype=np.float32)
-
-        batch = np.array(windows, dtype=np.float32)[:, :, :, None]
-        emb = self.embed_sess.run(None, {'input_1': batch})[0].squeeze(axis=(1, 2))
-
-        if emb.shape[0] >= n_frames:
-            return emb[:n_frames]
-        return np.vstack([emb, np.zeros((n_frames - emb.shape[0], 96), dtype=np.float32)])
 
 
 # --- Caching ---
@@ -81,6 +48,34 @@ def _files_hash(file_list):
         h.update(f.encode())
         h.update(str(Path(f).stat().st_mtime_ns).encode())
     return h.hexdigest()[:12]
+
+
+def vad_filter(vad, file_list, cache_path, sr=16000, threshold=0.5, chunk_size=512):
+    """Filter file list to only those containing speech. Cached."""
+    fhash = _files_hash(file_list)
+    if cache_path.exists():
+        cached = np.load(cache_path, allow_pickle=True)
+        if str(cached.get("key", "")) == fhash:
+            kept = list(cached["files"])
+            print(f"  VAD filter: {len(kept)}/{len(file_list)} have speech (cached)")
+            return kept
+
+    kept = []
+    for f in file_list:
+        vad.reset_states()
+        audio, _ = librosa.load(f, sr=sr)
+        has_speech = False
+        for i in range(0, len(audio) - chunk_size + 1, chunk_size):
+            prob = vad(torch.from_numpy(audio[i:i+chunk_size]), sr).item()
+            if prob > threshold:
+                has_speech = True
+                break
+        if has_speech:
+            kept.append(f)
+
+    np.savez(cache_path, files=kept, key=fhash)
+    print(f"  VAD filter: {len(kept)}/{len(file_list)} have speech")
+    return kept
 
 
 def embed_files(extractor, file_list, cache_path, label, sr=16000, window_sec=2.0,
@@ -206,9 +201,6 @@ def prepare_librispeech(extractor, cfg, n_frames=16):
         if len(embeddings) % 500 == 0 and len(embeddings) > 0:
             print(f"  {len(embeddings)}/{max_samples} clips...")
 
-    for _ in range(200):
-        embeddings.append(extractor.extract_fixed(np.zeros(window_samples, dtype=np.float32), sr, n_frames))
-
     libri_emb = np.array(embeddings)
     np.save(cache_file, libri_emb)
     print(f"  LibriSpeech: {len(libri_emb)} embeddings (cached)")
@@ -235,31 +227,40 @@ def train(cfg):
     print("Loading embedding models...")
     extractor = EmbeddingExtractor()
 
+    # Silero VAD — filter negatives to speech-only
+    vad, _ = torch.hub.load("snakers4/silero-vad", "silero_vad",
+                            verbose=False, onnx=False, trust_repo=True)
+
     # --- Embed all sources (cached after first run) ---
     print("\n=== Embedding audio ===")
 
-    # Positives with audio augmentation
+    # Positives with audio augmentation (no VAD filter — all are speech)
     pos_files = sorted(glob.glob(str(Path(tc["positive_dir"]) / "*.wav")))
     pos_all = embed_files(extractor, pos_files, data_dir / "pos_embeddings.npz",
                           "Positives", sr, ac["window_sec"], n_frames, n_aug=n_aug)
     emb_per_file = 1 + n_aug
     pos_by_file = pos_all.reshape(len(pos_files), emb_per_file, n_frames, 96)
 
-    # Hand-recorded negatives (augmented same as positives)
+    # Hand-recorded negatives (VAD filtered, augmented)
     neg_files = sorted(glob.glob(str(Path(tc["negative_dir"]) / "*.wav")))
     user_emb = None
     if neg_files:
-        user_emb = embed_files(extractor, neg_files, data_dir / "user_neg_embeddings.npz",
-                               "Hand-recorded negs", sr, ac["window_sec"], n_frames, n_aug=n_aug)
+        neg_files = vad_filter(vad, neg_files, data_dir / "user_neg_vad.npz", sr)
+        if neg_files:
+            user_emb = embed_files(extractor, neg_files, data_dir / "user_neg_embeddings.npz",
+                                   "Hand-recorded negs", sr, ac["window_sec"], n_frames,
+                                   n_aug=n_aug)
 
-    # Voice recording (long audio file, auto-sliced into 2s WAV clips)
+    # Voice recording (VAD filtered)
     voice_emb = None
     voice_path = tc.get("voice_recording", "")
     if voice_path:
         voice_files = slice_voice_recording(voice_path, data_dir / "voice_clips", sr, ac["window_sec"])
         if voice_files:
-            voice_emb = embed_files(extractor, voice_files, data_dir / "voice_embeddings.npz",
-                                    "Voice recording", sr, ac["window_sec"], n_frames)
+            voice_files = vad_filter(vad, voice_files, data_dir / "voice_vad.npz", sr)
+            if voice_files:
+                voice_emb = embed_files(extractor, voice_files, data_dir / "voice_embeddings.npz",
+                                        "Voice recording", sr, ac["window_sec"], n_frames)
 
     # LibriSpeech
     libri_emb = prepare_librispeech(extractor, cfg, n_frames)

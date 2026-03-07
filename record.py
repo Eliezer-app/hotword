@@ -43,7 +43,7 @@ def main():
     parser = argparse.ArgumentParser(description="Record wake word samples")
     parser.add_argument("--output-dir", default=".", help="Output directory")
     parser.add_argument("--prefix", default="wake", help="Filename prefix")
-    parser.add_argument("--duration", type=float, default=3.0, help="Max seconds per recording")
+    parser.add_argument("--duration", type=float, default=2.0, help="Max seconds per recording")
     parser.add_argument("--sr", type=int, default=16000, help="Sample rate")
     parser.add_argument("-n", type=int, default=0, help="Number of samples to record (0 = until quit)")
     args = parser.parse_args()

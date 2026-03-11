@@ -24,6 +24,7 @@ import onnxruntime as ort
 import torch
 import yaml
 
+from augment import pad_or_trim
 from embedding import EmbeddingExtractor
 
 _DIR = Path(__file__).resolve().parent
@@ -45,9 +46,12 @@ class Detector:
         opts.intra_op_num_threads = 1
         self.classifier = ort.InferenceSession(classifier_path, opts)
 
-    def predict(self, audio_float, n_frames=16):
-        """Run full pipeline on float32 audio buffer, return probability."""
-        emb = self.extractor.extract_fixed(audio_float, n_frames=n_frames)
+    def predict(self, audio_float, sr=16000, n_frames=16):
+        """Run full pipeline on float32 audio buffer, return probability.
+        Center-pads to 2s for embedding."""
+        embed_samples = int(2.0 * sr)
+        audio = pad_or_trim(audio_float, embed_samples)
+        emb = self.extractor.extract_fixed(audio, n_frames=n_frames)
         if np.all(emb == 0):
             return 0.0
         prob = self.classifier.run(None, {'embeddings': emb[None, :]})[0].item()
@@ -187,7 +191,7 @@ def main():
     print("Hotword: ready", file=sys.stderr, flush=True)
 
     sr = ac["sample_rate"]
-    window_samples = int(ac["window_sec"] * sr)
+    window_samples = sr  # 1s buffer, center-padded to 2s at predict time
     step_samples = int(dc["step_ms"] / 1000 * sr)
 
     audio_buffer = np.zeros(window_samples, dtype=np.float32)
@@ -215,12 +219,22 @@ def main():
     print("Press Ctrl+C to stop.\n")
 
     silero_buf = np.zeros(0, dtype=np.float32)
+    peak_window = 2.0  # seconds
+    peak_consec = [0.0, 0.0, 0.0]
+    peak_consec_time = 0.0
+    recent = []
 
     for chunk in chunks:
         if not running:
             break
         audio_buffer = np.roll(audio_buffer, -len(chunk))
         audio_buffer[-len(chunk):] = chunk
+
+        now = time.time()
+        if now < cooldown_until:
+            consecutive = 0
+            armed = True
+            continue
 
         # VAD gate — only classify when speech detected
         silero_buf = np.append(silero_buf, chunk)
@@ -237,12 +251,19 @@ def main():
             prob = detector.predict(audio_buffer)
 
         if args.debug:
+            recent.append(prob)
+            if len(recent) >= 3:
+                avg = sum(recent[-3:]) / 3
+                if avg > sum(peak_consec) / 3:
+                    peak_consec = list(recent[-3:])
+                    peak_consec_time = now
+            if now - peak_consec_time > peak_window:
+                peak_consec = [0.0, 0.0, 0.0]
+                peak_consec_time = now
+                recent.clear()
             bar = "#" * int(prob * 40)
-            print(f"\r  conf: {prob:.3f} [{bar:<40s}]", end="", flush=True)
-
-        now = time.time()
-        if now < cooldown_until:
-            continue
+            pc = " ".join(f"{v:.2f}" for v in peak_consec)
+            print(f"\r  peak: [{pc}] [{bar:<40s}]", end="", flush=True)
 
         if recorder:
             recorder.update(prob, audio_buffer)
@@ -254,7 +275,11 @@ def main():
             armed = True
 
         if consecutive >= dc["smoothing_window"] and armed:
-            print(f"DETECTED (confidence: {prob:.3f})", flush=True)
+            print(f"DETECTED", flush=True)
+            if args.debug:
+                peak_consec = [0.0, 0.0, 0.0]
+                peak_consec_time = now
+                recent.clear()
             if recorder:
                 recorder.mark_hit(prob, audio_buffer)
             consecutive = 0

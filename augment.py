@@ -5,7 +5,7 @@ Fast numpy-based augmentations (no librosa phase vocoder).
 """
 
 import numpy as np
-from scipy.signal import resample_poly
+from scipy.signal import resample_poly, butter, sosfilt
 from scipy.interpolate import interp1d
 
 
@@ -67,6 +67,12 @@ def speed_perturb(audio, factor):
     return interp(indices).astype(np.float32)
 
 
+def low_pass(audio, sr, cutoff_hz):
+    """Low-pass filter to simulate muted/distant speech."""
+    sos = butter(4, cutoff_hz, btype='low', fs=sr, output='sos')
+    return sosfilt(sos, audio).astype(np.float32)
+
+
 def augment_one(audio, sr):
     """Apply a random combination of augmentations to one sample."""
     aug = audio.copy()
@@ -97,7 +103,11 @@ def augment_one(audio, sr):
 
 
 def pad_or_trim(audio, target_len):
-    """Pad with zeros or trim to exact length."""
+    """Center-pad with zeros or center-trim to exact length."""
     if len(audio) >= target_len:
-        return audio[:target_len]
-    return np.pad(audio, (0, target_len - len(audio)))
+        start = (len(audio) - target_len) // 2
+        return audio[start:start + target_len]
+    pad_total = target_len - len(audio)
+    pad_left = pad_total // 2
+    pad_right = pad_total - pad_left
+    return np.pad(audio, (pad_left, pad_right))

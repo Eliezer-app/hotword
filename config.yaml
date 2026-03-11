@@ -3,22 +3,24 @@ audio:
   window_sec: 2.0
 
 model:
-  hidden: 64
-  dropout: 0.3
+  hidden: 128
+  dropout: 0.2
 
 training:
   positive_dir: "train_data/positive"
+  tts_positive_dir: "train_data/tts_positive"
   negative_dir: "train_data/negative"
   voice_recording: "raw/my-voice.mp4"  # optional: long audio file of user's voice (no wake word)
   augmentations_per_sample: 50
   negative_data_url: "https://www.openslr.org/resources/12/dev-clean.tar.gz"
   negative_max_samples: 10000
-  n_test_samples: 4
+  n_test_samples: 8
+  n_seeds: 3
   batch_size: 64
-  epochs: 80
+  epochs: 40
   learning_rate: 0.001
   weight_decay: 0.0001
-  patience: 10
+  patience: 7
   data_dir: "data"
   output_dir: "output"
 

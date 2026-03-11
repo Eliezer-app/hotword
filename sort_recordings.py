@@ -20,9 +20,10 @@ import tty
 from pathlib import Path
 
 _DIR = Path(__file__).resolve().parent
+DATA_DIR = "train_data_new"
 REC_DIR = _DIR / "recordings"
-POS_DIR = _DIR / "train_data" / "positive"
-NEG_DIR = _DIR / "train_data" / "negative"
+POS_DIR = _DIR / DATA_DIR / "positive"
+NEG_DIR = _DIR / DATA_DIR / "negative"
 
 
 def getch():

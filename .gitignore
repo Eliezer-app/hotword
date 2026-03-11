@@ -10,6 +10,9 @@ old
 output
 recordings/
 
+train_data_new
+*.mp4
+
 copy-model-to-macmini.sh
 copy-recordings-from-macmini.sh
 

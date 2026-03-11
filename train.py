@@ -224,52 +224,28 @@ def train(cfg):
     n_seeds = tc.get("n_seeds", 5)
     np.random.seed(42)
 
-    print("Loading embedding models...")
-    extractor = EmbeddingExtractor()
+    # --- Load positives from cache ---
+    print("\n=== Loading cached embeddings ===")
 
-    # Silero VAD — filter negatives to speech-only
-    vad, _ = torch.hub.load("snakers4/silero-vad", "silero_vad",
-                            verbose=False, onnx=False, trust_repo=True)
-
-    # --- Embed all sources (cached after first run) ---
-    print("\n=== Embedding audio ===")
-
-    # Positives with audio augmentation (no VAD filter — all are speech)
     pos_files = sorted(glob.glob(str(Path(tc["positive_dir"]) / "*.wav")))
-    pos_all = embed_files(extractor, pos_files, data_dir / "pos_embeddings.npz",
-                          "Positives", sr, ac["window_sec"], n_frames, n_aug=n_aug)
+    pos_cache = data_dir / "pos_embeddings.npz"
+    if not pos_cache.exists():
+        print("ERROR: no positive embeddings found. Run --embed pos first.")
+        return
+    pos_all = np.load(pos_cache, allow_pickle=True)["embeddings"]
+    print(f"  Positives: {len(pos_all)} embeddings")
     emb_per_file = 1 + n_aug
     pos_by_file = pos_all.reshape(len(pos_files), emb_per_file, n_frames, 96)
 
-    # Hand-recorded negatives (VAD filtered, augmented)
-    neg_files = sorted(glob.glob(str(Path(tc["negative_dir"]) / "*.wav")))
-    user_emb = None
-    if neg_files:
-        neg_files = vad_filter(vad, neg_files, data_dir / "user_neg_vad.npz", sr)
-        if neg_files:
-            user_emb = embed_files(extractor, neg_files, data_dir / "user_neg_embeddings.npz",
-                                   "Hand-recorded negs", sr, ac["window_sec"], n_frames,
-                                   n_aug=n_aug)
-
-    # Voice recording (VAD filtered)
-    voice_emb = None
-    voice_path = tc.get("voice_recording", "")
-    if voice_path:
-        voice_files = slice_voice_recording(voice_path, data_dir / "voice_clips", sr, ac["window_sec"])
-        if voice_files:
-            voice_files = vad_filter(vad, voice_files, data_dir / "voice_vad.npz", sr)
-            if voice_files:
-                voice_emb = embed_files(extractor, voice_files, data_dir / "voice_embeddings.npz",
-                                        "Voice recording", sr, ac["window_sec"], n_frames)
-
-    # LibriSpeech
-    libri_emb = prepare_librispeech(extractor, cfg, n_frames)
-
-    t_embed = time.time() - t0
-    print(f"\nEmbedding: {t_embed:.1f}s")
+    # TTS positives
+    tts_all = None
+    tts_cache = data_dir / "tts_pos_embeddings.npz"
+    if tts_cache.exists():
+        tts_all = np.load(tts_cache, allow_pickle=True)["embeddings"]
+        print(f"  TTS positives: {len(tts_all)} embeddings")
 
     # --- Split positives: train + val only (external test_data/ for eval) ---
-    n_val = 4
+    n_val = tc.get("n_test_samples", 4)
     indices = np.random.permutation(len(pos_files))
     val_idx = indices[:n_val]
     train_idx = indices[n_val:]
@@ -277,15 +253,32 @@ def train(cfg):
     train_pos = pos_by_file[train_idx].reshape(-1, n_frames, 96)
     val_pos = pos_by_file[val_idx].reshape(-1, n_frames, 96)
 
-    print(f"Positives: {len(train_idx)} train ({len(train_pos)}), "
-          f"{len(val_idx)} val ({len(val_pos)})")
+    # Add TTS positives to training (all of them, no val split)
+    if tts_all is not None:
+        train_pos = np.concatenate([train_pos, tts_all])
 
-    # --- Combine negatives ---
-    neg_parts = [libri_emb]
-    if voice_emb is not None:
-        neg_parts.append(voice_emb)
-    if user_emb is not None:
-        neg_parts.append(user_emb)
+    print(f"Positives: {len(train_idx)} real train ({pos_by_file[train_idx].reshape(-1, n_frames, 96).shape[0]})"
+          f" + {len(tts_all) if tts_all is not None else 0} TTS"
+          f" = {len(train_pos)}, val={len(val_pos)}")
+
+    # --- Combine negatives from group caches ---
+    neg_parts = []
+    # LibriSpeech (legacy cache)
+    libri_path = data_dir / "negative_embeddings.npy"
+    if libri_path.exists():
+        libri_emb = np.load(libri_path)
+        print(f"  LibriSpeech: {len(libri_emb)} embeddings")
+        neg_parts.append(libri_emb)
+    # Group caches
+    for g in NEG_GROUPS:
+        cache = data_dir / f"neg_{g}_embeddings.npz"
+        if cache.exists():
+            embs = np.load(cache, allow_pickle=True)["embeddings"]
+            print(f"  {g}: {len(embs)} embeddings")
+            neg_parts.append(embs)
+    if not neg_parts:
+        print("ERROR: no negative embeddings found. Run --embed neg first.")
+        return
     all_neg = np.concatenate(neg_parts)
 
     neg_perm = np.random.permutation(len(all_neg))
@@ -377,7 +370,7 @@ def train(cfg):
                 if patience_counter >= tc["patience"]:
                     break
 
-        print(f"  Seed {seed}: val_loss={best_val_loss:.4f}  best_f1={best_f1:.3f}  epochs={epoch+1}")
+        print(f"  Seed {seed}: train_loss={train_loss:.4f}  val_loss={best_val_loss:.4f}  best_f1={best_f1:.3f}  epochs={epoch+1}")
 
         if best_f1 > best_seed_f1:
             best_seed_f1 = best_f1
@@ -418,9 +411,86 @@ def train(cfg):
     print(f"\nTotal: {time.time() - t0:.1f}s")
 
 
+def embed_neg_group(cfg, group):
+    """Embed one negative group. Groups: user, partial, podcast1, podcast2, tts_neg, voice."""
+    tc = cfg["training"]
+    ac = cfg["audio"]
+    data_dir = Path(tc["data_dir"])
+    data_dir.mkdir(parents=True, exist_ok=True)
+    sr = ac["sample_rate"]
+
+    neg_files = sorted(glob.glob(str(Path(tc["negative_dir"]) / "*.wav")))
+    group_files = []
+    for f in neg_files:
+        name = Path(f).name
+        if group == "podcast1" and name.startswith("podcast1"):
+            group_files.append(f)
+        elif group == "podcast2" and name.startswith("podcast2"):
+            group_files.append(f)
+        elif group == "tts_neg" and name.startswith("tts_neg"):
+            group_files.append(f)
+        elif group == "voice" and name.startswith("voice"):
+            group_files.append(f)
+        elif group == "partial" and name.startswith("partial"):
+            group_files.append(f)
+        elif group == "user" and not any(name.startswith(p) for p in
+                ["podcast1", "podcast2", "tts_neg", "voice", "partial"]):
+            group_files.append(f)
+
+    if not group_files:
+        print(f"No files for group '{group}'")
+        return
+
+    print(f"Group '{group}': {len(group_files)} files")
+    extractor = EmbeddingExtractor()
+
+    # VAD filter (skip for tts_neg — all speech)
+    if group != "tts_neg":
+        vad, _ = torch.hub.load("snakers4/silero-vad", "silero_vad",
+                                verbose=False, onnx=False, trust_repo=True)
+        group_files = vad_filter(vad, group_files,
+                                 data_dir / f"neg_{group}_vad.npz", sr)
+
+    embed_files(extractor, group_files, data_dir / f"neg_{group}_embeddings.npz",
+                group, sr, ac["window_sec"], 16, n_aug=0)
+
+
+NEG_GROUPS = ["user", "partial", "podcast1", "podcast2", "tts_neg", "voice"]
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--embed", choices=["pos", "tts", "neg"] + NEG_GROUPS,
+                        help="Embed one group only, then exit")
     args = parser.parse_args()
     cfg = load_config(args.config)
-    train(cfg)
+
+    if args.embed == "pos":
+        tc = cfg["training"]
+        ac = cfg["audio"]
+        data_dir = Path(tc["data_dir"])
+        data_dir.mkdir(parents=True, exist_ok=True)
+        extractor = EmbeddingExtractor()
+        pos_files = sorted(glob.glob(str(Path(tc["positive_dir"]) / "*.wav")))
+        embed_files(extractor, pos_files, data_dir / "pos_embeddings.npz",
+                    "Positives", ac["sample_rate"], ac["window_sec"], 16,
+                    n_aug=tc["augmentations_per_sample"])
+    elif args.embed == "tts":
+        tc = cfg["training"]
+        ac = cfg["audio"]
+        data_dir = Path(tc["data_dir"])
+        data_dir.mkdir(parents=True, exist_ok=True)
+        extractor = EmbeddingExtractor()
+        tts_files = sorted(glob.glob(str(Path(tc["tts_positive_dir"]) / "*.wav")))
+        tts_n_aug = max(1, tc["augmentations_per_sample"] // 10)
+        embed_files(extractor, tts_files, data_dir / "tts_pos_embeddings.npz",
+                    "TTS positives", ac["sample_rate"], ac["window_sec"], 16,
+                    n_aug=tts_n_aug)
+    elif args.embed == "neg":
+        for g in NEG_GROUPS:
+            embed_neg_group(cfg, g)
+    elif args.embed in NEG_GROUPS:
+        embed_neg_group(cfg, args.embed)
+    else:
+        train(cfg)

@@ -57,3 +57,13 @@ Each entry: date, arch, data sizes, duration, train results (loss, acc), eval re
 - **Duration**: 76s (3 seeds)
 - **Eval**: TP=28 FP=0 FN=0 F1=1.000
 - **Notes**: neg12: 0.834→0.217! neg11 also down. All positives ≥0.952. 5 context negs = sweet spot vs 90 that killed recall.
+
+## Embedding Analysis
+Most discriminative dims (pos vs neg, temporal variance):
+- **dim 95**: strong downward sweep (37→3) in pos, flat (~20) in neg — most discriminative
+- **dim 42**: bell curve peaking frames 3-4 (~67) in pos, flat (~44) in neg — "hey" energy
+- **dim 77**: dips to -20 at frames 9-11 in pos, near 0 in neg — "eliezer" tail
+- **dim 0**: V-shape dip to -23 at frames 6-7 in pos, flat in neg
+- **dim 37, 12, 46, 73**: also show clear pos/neg temporal separation
+
+Future: consider feeding only top discriminative dims to classifier, or using dim-specific attention weights.
